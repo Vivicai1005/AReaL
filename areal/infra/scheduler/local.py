@@ -88,6 +88,19 @@ def _get_device_count_safely() -> int | None:
     except (OSError, ValueError):
         return None
 
+    # No per-device nodes in /dev. ROCm exposes /dev/kfd plus /dev/dri/renderD*,
+    # and /dev/dri routinely holds far more entries than there are GPUs, so it
+    # cannot be counted the same way. Ask the platform instead: torch reports
+    # the count via amdsmi/nvml without creating a device context.
+    try:
+        count = current_platform.device_count()
+    except Exception as e:
+        logger.warning(f"Could not get device count from platform: {e}")
+        return None
+    # Keep returning None when there is no accelerator, so callers preserve
+    # their existing CPU-only behavior.
+    return count if count > 0 else None
+
 
 class LocalScheduler(Scheduler):
     """Local scheduler that manages worker subprocesses on a single GPU node.

@@ -17,6 +17,19 @@ from areal.infra.rpc.serialization import serialize_value
 RESULT_IPC_ENV = "AREAL_AWEX_RESULT_IPC"
 
 
+def _sched_rank(scheduler: Any, name: str) -> Any:
+    """Read a parallelism rank off a SGLang ``Scheduler``.
+
+    Newer SGLang builds moved ``tp_rank``/``dp_rank``/... off the scheduler
+    onto a ``ParallelState`` dataclass at ``scheduler.ps``; older ones keep
+    them as flat attributes. Returns None when neither carries the field.
+    """
+    ps = getattr(scheduler, "ps", None)
+    if ps is not None and hasattr(ps, name):
+        return getattr(ps, name)
+    return getattr(scheduler, name, None)
+
+
 class AwexSchedulerBridge:
     """Compose awex weight-update capabilities onto a plain Scheduler instance.
 
@@ -39,10 +52,11 @@ class AwexSchedulerBridge:
         result_ipc = os.environ.get(RESULT_IPC_ENV)
         # Only tp_rank==0 AND dp_rank==0 should push results to avoid
         # duplicate/corrupted messages on the single PULL socket.
+        dp_rank = _sched_rank(scheduler, "dp_rank")
         if (
             result_ipc
-            and scheduler.tp_rank == 0
-            and (getattr(scheduler, "dp_rank", None) is None or scheduler.dp_rank == 0)
+            and _sched_rank(scheduler, "tp_rank") == 0
+            and (dp_rank is None or dp_rank == 0)
         ):
             ctx = zmq.Context(1)
             self._result_push = ctx.socket(zmq.PUSH)
@@ -115,7 +129,7 @@ class AwexSchedulerBridge:
         self, save_path: str, names: list[str] | None = None
     ) -> None:
         adapter = self._require_adapter()
-        if self._scheduler.tp_rank == 0:
+        if _sched_rank(self._scheduler, "tp_rank") == 0:
             adapter.save_parameters(save_path, names)
 
     def awex_randomize_parameters(self) -> None:
@@ -170,7 +184,24 @@ def areal_run_scheduler_process(
 
     import psutil
     from sglang.srt.environ import envs
-    from sglang.srt.managers.scheduler import Scheduler, configure_scheduler
+    from sglang.srt.managers.scheduler import Scheduler
+    # ---- BEGIN AREAL ----
+    # sglang renamed configure_scheduler -> configure_scheduler_process
+    # and inserted gpu_id as its second positional argument (CPU-affinity and
+    # NUMA binding moved inside the callee).  Support both spellings.
+    try:
+        from sglang.srt.managers.scheduler import configure_scheduler
+
+        def _configure_scheduler(gpu_id, *args):
+            return configure_scheduler(*args)
+
+    except ImportError:
+        from sglang.srt.managers.scheduler import configure_scheduler_process
+
+        def _configure_scheduler(gpu_id, *args):
+            return configure_scheduler_process(args[0], gpu_id, *args[1:])
+
+    # ---- END AREAL ----
     from sglang.srt.observability.trace import (
         process_tracing_init,
         trace_set_thread_info,
@@ -191,8 +222,15 @@ def areal_run_scheduler_process(
     )
 
     logger = logging.getLogger(__name__)
-    dp_rank = configure_scheduler(
-        server_args, tp_rank, attn_cp_rank, moe_dp_rank, moe_ep_rank, pp_rank, dp_rank
+    dp_rank = _configure_scheduler(
+        gpu_id,
+        server_args,
+        tp_rank,
+        attn_cp_rank,
+        moe_dp_rank,
+        moe_ep_rank,
+        pp_rank,
+        dp_rank,
     )
 
     kill_itself_when_parent_died()
