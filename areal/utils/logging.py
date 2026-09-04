@@ -99,6 +99,7 @@ LOGGER_COLORS_EXACT = {
     "PlatformInit": "light_cyan",
     "CUDAPlatform": "light_cyan",
     "NPUPlatform": "light_cyan",
+    "ROCmPlatform": "light_cyan",
     "UnknownPlatform": "light_cyan",
     # Sandbox backends
     "DaytonaClientManager": "blue",
